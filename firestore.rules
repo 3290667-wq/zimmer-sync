@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: userId, email, displayName, photoURL, role
+    //
+    // Collection: zimmers
+    // Fields: ownerUid, name, location, rooms, beds, price, contactInfo, notes, dates, disabledDates, updatedAt
+    //
+    // Collection: requests
+    // Fields: customerName, locationPref, dates, roomsNeeded, bedsNeeded, budget, contactInfo, notes, createdBy, updatedAt
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "3290667@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // Validate string size
+    function isValidString(val, max) {
+      return val is string && val.size() <= max;
+    }
+
+    // Validate Zimmer Data
+    function isValidZimmer(data) {
+      return data.keys().hasAll(['name', 'location']) &&
+             isValidString(data.name, 100) &&
+             isValidString(data.location, 100) &&
+             (!('contactInfo' in data) || isValidString(data.contactInfo, 100)) &&
+             (!('notes' in data) || isValidString(data.notes, 1000));
+    }
+
+    // Validate Request Data
+    function isValidRequest(data) {
+      return data.keys().hasAll(['customerName', 'dates']) &&
+             isValidString(data.customerName, 100) &&
+             isValidString(data.dates, 100) &&
+             (!('locationPref' in data) || isValidString(data.locationPref, 100));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    match /zimmers/{zimmerId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidZimmer(request.resource.data);
+      allow update: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.ownerUid) && isValidZimmer(request.resource.data);
+      allow delete: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.ownerUid);
+    }
+
+    match /requests/{requestId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidRequest(request.resource.data);
+      allow update: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.createdBy) && isValidRequest(request.resource.data);
+      allow delete: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.createdBy);
+    }
+  }
+}
