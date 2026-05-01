@@ -6,7 +6,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Download, Trash2, Edit2, Check, X, Search, Calendar as CalendarIcon, Bed, DoorOpen, Phone, MapPin, ClipboardList, Info, LogOut, User, Loader2, Sparkles, ChevronDown, ChevronUp, Filter, BarChart3, TrendingUp, MessageCircle, Users, Settings, Home, DollarSign, Upload, Image, Heart, Camera, Plus } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ZimmerAvailability, CustomerRequest, DateStatus, UserProfile, UserRole } from './types.ts';
+import { ZimmerAvailability, CustomerRequest, DateStatus, UserProfile, UserRole, ZimmerUnit } from './types.ts';
 import { HebrewCalendar, HDate, Location, Event } from '@hebcal/core';
 import { parseWhatsAppText } from './lib/gemini.ts';
 import { auth, db, loginWithGoogle, handleFirestoreError, OperationType, uploadLogo, uploadZimmerImage } from './firebase.ts';
@@ -1411,6 +1411,8 @@ export default function App() {
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [showEditProfile, setShowEditProfile] = useState(false);
   const [filterDate, setFilterDate] = useState<string>('');
+  const [mainCalendarMonth, setMainCalendarMonth] = useState<Date>(new Date());
+  const [selectedMainDate, setSelectedMainDate] = useState<string | null>(null);
   const [showNewRequest, setShowNewRequest] = useState(false);
   const [isGuestMode, setIsGuestMode] = useState(false);
   const [guestLoadError, setGuestLoadError] = useState<string | null>(null);
@@ -1418,6 +1420,10 @@ export default function App() {
   const [isConnectingCalendar, setIsConnectingCalendar] = useState(false);
   const [calendarEmail, setCalendarEmail] = useState<string | null>(null);
   const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
+  const [showUnitForm, setShowUnitForm] = useState(false);
+  const [editingUnit, setEditingUnit] = useState<ZimmerUnit | null>(null);
+  const [expandedUnitCalendar, setExpandedUnitCalendar] = useState<string | null>(null);
+  const [myZimmerCalendarMonth, setMyZimmerCalendarMonth] = useState<Date>(new Date());
 
   // Firebase Auth Listener
   useEffect(() => {
@@ -1862,6 +1868,70 @@ export default function App() {
     } catch (e) { handleFirestoreError(e, OperationType.CREATE, 'requests'); }
   };
 
+  // Unit management functions
+  const addUnit = async (zimmerId: string, unitData: Omit<ZimmerUnit, 'id'>) => {
+    const zimmer = zimmers.find(z => z.id === zimmerId);
+    if (!zimmer) return;
+    if ((zimmer.units?.length || 0) >= 5) {
+      alert('ניתן להוסיף עד 5 יחידות נופש');
+      return;
+    }
+    const newUnit: ZimmerUnit = {
+      id: `unit_${Date.now()}`,
+      name: sanitizeForDisplay(unitData.name),
+      beds: Math.max(1, Math.min(50, unitData.beds)),
+      rooms: Math.max(1, Math.min(20, unitData.rooms)),
+      price: unitData.price ? sanitizeForDisplay(unitData.price) : undefined,
+      notes: unitData.notes ? sanitizeForDisplay(unitData.notes).slice(0, 500) : undefined,
+      dateStatuses: {}
+    };
+    const updatedUnits = [...(zimmer.units || []), newUnit];
+    await updateZimmer(zimmerId, { units: updatedUnits } as Partial<ZimmerAvailability>);
+    setShowUnitForm(false);
+    setEditingUnit(null);
+  };
+
+  const updateUnit = async (zimmerId: string, unitId: string, updates: Partial<ZimmerUnit>) => {
+    const zimmer = zimmers.find(z => z.id === zimmerId);
+    if (!zimmer || !zimmer.units) return;
+    const updatedUnits = zimmer.units.map(unit => {
+      if (unit.id !== unitId) return unit;
+      return {
+        ...unit,
+        name: updates.name ? sanitizeForDisplay(updates.name) : unit.name,
+        beds: updates.beds !== undefined ? Math.max(1, Math.min(50, updates.beds)) : unit.beds,
+        rooms: updates.rooms !== undefined ? Math.max(1, Math.min(20, updates.rooms)) : unit.rooms,
+        price: updates.price !== undefined ? (updates.price ? sanitizeForDisplay(updates.price) : undefined) : unit.price,
+        notes: updates.notes !== undefined ? (updates.notes ? sanitizeForDisplay(updates.notes).slice(0, 500) : undefined) : unit.notes,
+        dateStatuses: updates.dateStatuses !== undefined ? updates.dateStatuses : unit.dateStatuses
+      };
+    });
+    await updateZimmer(zimmerId, { units: updatedUnits } as Partial<ZimmerAvailability>);
+    setShowUnitForm(false);
+    setEditingUnit(null);
+  };
+
+  const deleteUnit = async (zimmerId: string, unitId: string) => {
+    const zimmer = zimmers.find(z => z.id === zimmerId);
+    if (!zimmer || !zimmer.units) return;
+    if (!window.confirm('האם אתה בטוח שברצונך למחוק יחידה זו?')) return;
+    const updatedUnits = zimmer.units.filter(unit => unit.id !== unitId);
+    await updateZimmer(zimmerId, { units: updatedUnits } as Partial<ZimmerAvailability>);
+  };
+
+  const updateUnitDateStatus = async (zimmerId: string, unitId: string, date: string, status: DateStatus) => {
+    const zimmer = zimmers.find(z => z.id === zimmerId);
+    if (!zimmer || !zimmer.units) return;
+    const updatedUnits = zimmer.units.map(unit => {
+      if (unit.id !== unitId) return unit;
+      const newStatuses = { ...(unit.dateStatuses || {}), [date]: status };
+      // Remove 'available' entries to keep data clean
+      if (status === 'available') delete newStatuses[date];
+      return { ...unit, dateStatuses: newStatuses };
+    });
+    await updateZimmer(zimmerId, { units: updatedUnits } as Partial<ZimmerAvailability>);
+  };
+
   // Claim or unclaim a request
   const toggleClaimRequest = async (requestId: string) => {
     if (!user || !userProfile || userProfile.role !== 'owner') {
@@ -1925,8 +1995,31 @@ export default function App() {
     return hasAvailable;
   };
 
-  // Get zimmer status for a specific date
+  // Get unit status for a specific date
+  const getUnitStatusForDate = (unit: ZimmerUnit, dateKey: string): DateStatus => {
+    if (unit.dateStatuses && unit.dateStatuses[dateKey]) {
+      return unit.dateStatuses[dateKey];
+    }
+    return 'available';
+  };
+
+  // Get zimmer status for a specific date (checks units if present)
   const getZimmerStatusForDate = (zimmer: ZimmerAvailability, dateKey: string): DateStatus => {
+    // If zimmer has units, check if any unit is available
+    if (zimmer.units && zimmer.units.length > 0) {
+      let hasAvailable = false;
+      let hasMaybe = false;
+      for (const unit of zimmer.units) {
+        const unitStatus = getUnitStatusForDate(unit, dateKey);
+        if (unitStatus === 'available') hasAvailable = true;
+        if (unitStatus === 'maybe') hasMaybe = true;
+      }
+      if (hasAvailable) return 'available';
+      if (hasMaybe) return 'maybe';
+      return 'occupied';
+    }
+
+    // Fallback to zimmer-level status (for zimmers without units)
     if (zimmer.dateStatuses && zimmer.dateStatuses[dateKey]) {
       return zimmer.dateStatuses[dateKey];
     }
@@ -1934,6 +2027,14 @@ export default function App() {
       return 'occupied';
     }
     return 'available';
+  };
+
+  // Get available units for a zimmer on a specific date
+  const getAvailableUnitsForDate = (zimmer: ZimmerAvailability, dateKey: string): { unit: ZimmerUnit; status: DateStatus }[] => {
+    if (!zimmer.units || zimmer.units.length === 0) return [];
+    return zimmer.units
+      .map(unit => ({ unit, status: getUnitStatusForDate(unit, dateKey) }))
+      .filter(({ status }) => status !== 'occupied');
   };
 
   // Filter zimmers based on user role and date filter
@@ -2443,8 +2544,8 @@ export default function App() {
                     className={`flex-1 lg:flex-none flex items-center justify-between p-2 lg:p-3 rounded text-sm font-bold transition-all ${activeTab === 'matches' ? 'bg-[#FDF2F8] text-[#DB2777]' : 'bg-neutral-50 lg:bg-transparent hover:bg-neutral-100 text-face-muted'}`}
                   >
                     <div className="flex items-center gap-2">
-                      <Heart size={16} />
-                      <span>התאמות</span>
+                      <Home size={16} />
+                      <span>הצימר שלי</span>
                     </div>
                     <span className="hidden lg:inline bg-white/50 px-2 py-0.5 rounded text-xs">{myMatches.length}</span>
                   </button>
@@ -2518,11 +2619,11 @@ export default function App() {
         <section className="bg-white flex flex-col lg:h-full overflow-hidden">
           <div className="whatsapp-panel-header shrink-0">
             <span>
-              {activeTab === 'available' ? 'תוצאות מאגר - צימרים זמינים' :
+              {activeTab === 'available' ? 'לוח זמינות - בחר תאריך לראות צימרים פנויים' :
                activeTab === 'requests' ? 'תוצאות מאגר - ביקושי לקוחות' :
                activeTab === 'calendar' ? 'לוח שנה - תפוסת צימרים' :
                activeTab === 'stats' ? 'סטטיסטיקות ותובנות' :
-               activeTab === 'matches' ? 'ההתאמות שלי - ביקושים מתאימים לצימר שלך' :
+               activeTab === 'matches' ? 'הצימר שלי - ניהול זמינות ויחידות נופש' :
                'ניהול מערכת'}
             </span>
           </div>
@@ -2535,50 +2636,6 @@ export default function App() {
                   initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                   className="space-y-3 max-w-4xl mx-auto"
                 >
-                  {/* Date Filter */}
-                  <div className="bg-white rounded-lg border border-face-border p-4 flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                    <div className="flex items-center gap-2 text-sm font-bold text-face-text">
-                      <CalendarIcon size={18} className="text-whatsapp-primary" />
-                      <span>חפש לפי תאריך:</span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-1">
-                      <input
-                        type="date"
-                        value={filterDate}
-                        onChange={(e) => setFilterDate(e.target.value)}
-                        className="px-3 py-2 border border-face-border rounded-lg focus:outline-none focus:ring-2 focus:ring-whatsapp-primary text-sm"
-                      />
-                      {filterDate && (
-                        <button
-                          onClick={() => setFilterDate('')}
-                          className="p-2 text-face-muted hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                          title="נקה סינון"
-                        >
-                          <X size={18} />
-                        </button>
-                      )}
-                    </div>
-                    {filterDate && (
-                      <div className="text-xs text-face-muted">
-                        מציג {filteredZimmers.length} צימרים פנויים ב-{format(parseISO(filterDate), 'd בMMMM yyyy', { locale: he })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Status Legend when date filter is active */}
-                  {filterDate && filteredZimmers.length > 0 && (
-                    <div className="flex items-center gap-4 text-xs text-face-muted px-1">
-                      <div className="flex items-center gap-1">
-                        <div className="w-3 h-3 rounded-full bg-green-500" />
-                        <span>פנוי</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <div className="w-3 h-3 rounded-full bg-amber-500" />
-                        <span>אולי פנוי</span>
-                      </div>
-                    </div>
-                  )}
-
                   {guestLoadError ? (
                     <div className="p-12 text-center">
                       <p className="text-red-500 text-sm mb-4">{guestLoadError}</p>
@@ -2589,16 +2646,14 @@ export default function App() {
                         התחבר עם Google
                       </button>
                     </div>
-                  ) : filteredZimmers.length === 0 ? (
+                  ) : zimmers.length === 0 ? (
                     <div className="p-12 text-center">
                       <div className="text-5xl mb-4">🏡</div>
                       <h3 className="text-lg font-bold text-face-text mb-2">
-                        {filterDate ? 'אין צימרים פנויים בתאריך זה' : 'אין צימרים פנויים כרגע'}
+                        אין צימרים פנויים כרגע
                       </h3>
                       <p className="text-face-muted text-sm mb-6">
-                        {filterDate
-                          ? 'נסה לבחור תאריך אחר או להסיר את הסינון'
-                          : 'בעלי הצימרים עדיין לא עדכנו זמינות. נסה שוב מאוחר יותר.'}
+                        בעלי הצימרים עדיין לא עדכנו זמינות. נסה שוב מאוחר יותר.
                       </p>
                       {userProfile?.role === 'customer' && (
                         <div className="bg-gradient-to-r from-whatsapp-primary/10 to-emerald-100 p-4 rounded-xl border border-whatsapp-primary/20">
@@ -2624,28 +2679,15 @@ export default function App() {
                       )}
                     </div>
                   ) : (
-                    filteredZimmers.map(zimmer => {
-                      const dateStatus = filterDate ? getZimmerStatusForDate(zimmer, filterDate) : null;
-                      return (
-                        <div key={zimmer.id} className="relative">
-                          {filterDate && dateStatus && (
-                            <div className={`absolute top-3 left-3 z-10 px-2 py-1 rounded-full text-xs font-bold ${
-                              dateStatus === 'available'
-                                ? 'bg-green-100 text-green-700'
-                                : 'bg-amber-100 text-amber-700'
-                            }`}>
-                              {dateStatus === 'available' ? 'פנוי' : 'אולי פנוי'}
-                            </div>
-                          )}
-                          <ZimmerCard
-                            zimmer={zimmer}
-                            onDelete={deleteZimmer} onUpdate={updateZimmer}
-                            isEditing={editingId === zimmer.id} setIsEditing={(val) => setEditingId(val ? zimmer.id : null)}
-                            isAdmin={isAdmin}
-                          />
-                        </div>
-                      );
-                    })
+                    <MainCalendar
+                      zimmers={zimmers}
+                      month={mainCalendarMonth}
+                      onMonthChange={setMainCalendarMonth}
+                      selectedDate={selectedMainDate}
+                      onSelectDate={setSelectedMainDate}
+                      getZimmerStatusForDate={getZimmerStatusForDate}
+                      getAvailableUnitsForDate={getAvailableUnitsForDate}
+                    />
                   )}
                 </motion.div>
               )}
@@ -2733,122 +2775,262 @@ export default function App() {
                 <motion.div
                   key="matches"
                   initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                  className="space-y-3 max-w-4xl mx-auto"
+                  className="space-y-4 max-w-4xl mx-auto"
                 >
-                  {/* Owner's zimmer info */}
                   {(() => {
                     const myZimmer = zimmers.find(z => z.ownerUid === user?.uid);
-                    return myZimmer ? (
-                      <div className="bg-gradient-to-r from-pink-50 to-purple-50 rounded-lg border border-pink-200 p-4 mb-4">
-                        <div className="flex items-center gap-3">
-                          {myZimmer.logo && (
-                            <img src={myZimmer.logo} alt={myZimmer.name} className="w-12 h-12 rounded-full object-cover" />
-                          )}
-                          <div>
-                            <h3 className="font-bold text-face-text">{myZimmer.name}</h3>
-                            <div className="text-sm text-face-muted flex items-center gap-2">
-                              <MapPin size={14} />
-                              <span>{myZimmer.location}</span>
-                              <span>•</span>
-                              <Bed size={14} />
-                              <span>{myZimmer.beds} מיטות</span>
-                              <span>•</span>
-                              <DoorOpen size={14} />
-                              <span>{myZimmer.rooms} חדרים</span>
-                            </div>
-                          </div>
+                    if (!myZimmer) {
+                      return (
+                        <div className="bg-amber-50 rounded-lg border border-amber-200 p-6 text-center">
+                          <Home className="mx-auto mb-3 text-amber-500" size={48} />
+                          <p className="text-amber-700 font-bold mb-2">לא נמצא צימר משויך לחשבון שלך</p>
+                          <p className="text-amber-600 text-sm">עדכן את פרטי הצימר שלך בהגדרות הפרופיל</p>
                         </div>
-                      </div>
-                    ) : (
-                      <div className="bg-amber-50 rounded-lg border border-amber-200 p-4 text-center">
-                        <p className="text-amber-700">לא נמצא צימר משויך לחשבון שלך. הוסף צימר כדי לראות התאמות.</p>
-                      </div>
-                    );
-                  })()}
+                      );
+                    }
 
-                  {/* Matching requests */}
-                  {myMatches.length === 0 ? (
-                    <div className="p-12 text-center">
-                      <Heart className="mx-auto mb-4 text-pink-300" size={48} />
-                      <p className="text-face-muted text-sm">אין כרגע ביקושים שמתאימים לצימר שלך.</p>
-                      <p className="text-face-muted text-xs mt-2">ביקושים חדשים יופיעו כאן כשיתאימו למיקום, חדרים ומיטות שלך.</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      <div className="text-sm text-face-muted mb-2">
-                        נמצאו {myMatches.length} ביקושים מתאימים לצימר שלך
-                      </div>
-                      {myMatches.map(({ request, score, matchDetails }) => (
-                        <div key={request.id} className="whatsapp-card border-r-4 border-r-pink-400">
+                    return (
+                      <>
+                        {/* Zimmer Info Card */}
+                        <div className="bg-gradient-to-r from-whatsapp-primary/10 to-emerald-50 rounded-lg border border-whatsapp-primary/30 p-4">
                           <div className="flex items-start justify-between">
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-2">
-                                <span className="font-bold text-face-text">{request.customerName}</span>
-                                <span className="px-2 py-0.5 bg-pink-100 text-pink-700 rounded-full text-xs font-bold">
-                                  {score}% התאמה
-                                </span>
-                              </div>
-                              <div className="space-y-1 text-sm">
-                                <div className="flex items-center gap-2 text-face-muted">
-                                  <CalendarIcon size={14} />
-                                  <span>{request.dates}</span>
-                                  {matchDetails.datesOverlap && <Check size={14} className="text-green-500" />}
-                                </div>
-                                {request.locationPref && (
-                                  <div className="flex items-center gap-2 text-face-muted">
-                                    <MapPin size={14} />
-                                    <span>{request.locationPref}</span>
-                                    {matchDetails.locationMatch && <Check size={14} className="text-green-500" />}
-                                  </div>
-                                )}
-                                <div className="flex items-center gap-4 text-face-muted">
-                                  <span className="flex items-center gap-1">
-                                    <DoorOpen size={14} />
-                                    {request.roomsNeeded} חדרים
-                                    {matchDetails.roomsMatch && <Check size={14} className="text-green-500" />}
-                                  </span>
-                                  <span className="flex items-center gap-1">
-                                    <Bed size={14} />
-                                    {request.bedsNeeded} מיטות
-                                    {matchDetails.bedsMatch && <Check size={14} className="text-green-500" />}
-                                  </span>
-                                </div>
-                                {request.budget && (
-                                  <div className="flex items-center gap-2 text-face-muted">
-                                    <DollarSign size={14} />
-                                    <span>תקציב: {request.budget}</span>
-                                  </div>
-                                )}
-                                {request.contactInfo && (
-                                  <div className="flex items-center gap-2">
-                                    <Phone size={14} className="text-whatsapp-primary" />
-                                    <a
-                                      href={`https://wa.me/972${request.contactInfo.replace(/^0/, '').replace(/[-\s]/g, '')}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-whatsapp-primary hover:underline font-medium"
-                                    >
-                                      {request.contactInfo}
-                                    </a>
-                                  </div>
-                                )}
-                              </div>
-                              {request.notes && (
-                                <p className="mt-2 text-xs text-face-muted bg-gray-50 p-2 rounded">{request.notes}</p>
+                            <div className="flex items-center gap-3">
+                              {myZimmer.logo && (
+                                <img src={myZimmer.logo} alt={myZimmer.name} className="w-14 h-14 rounded-full object-cover border-2 border-whatsapp-primary/30" />
                               )}
+                              <div>
+                                <h3 className="font-bold text-lg text-face-text">{myZimmer.name}</h3>
+                                <div className="text-sm text-face-muted flex flex-wrap items-center gap-2">
+                                  <span className="flex items-center gap-1">
+                                    <MapPin size={14} />
+                                    {myZimmer.location}
+                                  </span>
+                                  {!myZimmer.units?.length && (
+                                    <>
+                                      <span>•</span>
+                                      <span className="flex items-center gap-1">
+                                        <DoorOpen size={14} />
+                                        {myZimmer.rooms} חדרים
+                                      </span>
+                                      <span>•</span>
+                                      <span className="flex items-center gap-1">
+                                        <Bed size={14} />
+                                        {myZimmer.beds} מיטות
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
                             </div>
                             <button
-                              onClick={() => toggleClaimRequest(request.id)}
-                              className="px-3 py-2 bg-whatsapp-primary text-white rounded-lg text-sm font-bold hover:bg-whatsapp-dark transition-all flex items-center gap-2"
+                              onClick={() => setShowEditProfile(true)}
+                              className="p-2 text-face-muted hover:text-whatsapp-primary hover:bg-whatsapp-primary/10 rounded-lg transition-all"
+                              title="ערוך פרטי צימר"
                             >
-                              <MessageCircle size={16} />
-                              תפוס
+                              <Settings size={20} />
                             </button>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+
+                        {/* Units Section */}
+                        <div className="bg-white rounded-lg border border-face-border p-4">
+                          <div className="flex items-center justify-between mb-4">
+                            <h3 className="font-bold text-face-text flex items-center gap-2">
+                              <Home size={18} />
+                              יחידות נופש
+                            </h3>
+                            {(myZimmer.units?.length || 0) < 5 && (
+                              <button
+                                onClick={() => { setEditingUnit(null); setShowUnitForm(true); }}
+                                className="px-3 py-1.5 bg-whatsapp-primary text-white rounded-lg text-sm font-bold hover:bg-whatsapp-dark transition-all flex items-center gap-1"
+                              >
+                                <Plus size={16} />
+                                הוסף יחידה
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Unit Form Modal */}
+                          {showUnitForm && (
+                            <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                              <h4 className="font-bold text-face-text mb-3">
+                                {editingUnit ? 'עריכת יחידה' : 'הוספת יחידה חדשה'}
+                              </h4>
+                              <UnitForm
+                                initialData={editingUnit || undefined}
+                                onSubmit={(data) => {
+                                  if (editingUnit) {
+                                    updateUnit(myZimmer.id, editingUnit.id, data);
+                                  } else {
+                                    addUnit(myZimmer.id, data);
+                                  }
+                                }}
+                                onCancel={() => { setShowUnitForm(false); setEditingUnit(null); }}
+                              />
+                            </div>
+                          )}
+
+                          {/* Units List */}
+                          {(!myZimmer.units || myZimmer.units.length === 0) ? (
+                            <div className="text-center py-6 text-face-muted">
+                              <Home className="mx-auto mb-2 opacity-30" size={40} />
+                              <p className="text-sm">אין יחידות נופש. הוסף יחידה כדי לנהל זמינות לכל יחידה בנפרד.</p>
+                              <p className="text-xs mt-1">או השתמש בלוח התפוסה הכללי למטה.</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              {myZimmer.units.map(unit => (
+                                <div key={unit.id} className="border border-face-border rounded-lg overflow-hidden">
+                                  {/* Unit Header */}
+                                  <div
+                                    className="flex items-center justify-between p-3 bg-neutral-50 cursor-pointer hover:bg-neutral-100 transition-all"
+                                    onClick={() => setExpandedUnitCalendar(expandedUnitCalendar === unit.id ? null : unit.id)}
+                                  >
+                                    <div className="flex items-center gap-3">
+                                      <div className="w-10 h-10 bg-whatsapp-primary/10 rounded-lg flex items-center justify-center">
+                                        <Home size={20} className="text-whatsapp-primary" />
+                                      </div>
+                                      <div>
+                                        <h4 className="font-bold text-face-text">{unit.name}</h4>
+                                        <div className="text-xs text-face-muted flex items-center gap-2">
+                                          <span>{unit.rooms} חדרים</span>
+                                          <span>•</span>
+                                          <span>{unit.beds} מיטות</span>
+                                          {unit.price && (
+                                            <>
+                                              <span>•</span>
+                                              <span>{unit.price}</span>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setEditingUnit(unit); setShowUnitForm(true); }}
+                                        className="p-1.5 text-face-muted hover:text-blue-500 hover:bg-blue-50 rounded transition-all"
+                                        title="ערוך יחידה"
+                                      >
+                                        <Edit2 size={16} />
+                                      </button>
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); deleteUnit(myZimmer.id, unit.id); }}
+                                        className="p-1.5 text-face-muted hover:text-red-500 hover:bg-red-50 rounded transition-all"
+                                        title="מחק יחידה"
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                      {expandedUnitCalendar === unit.id ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                                    </div>
+                                  </div>
+
+                                  {/* Unit Calendar */}
+                                  {expandedUnitCalendar === unit.id && (
+                                    <div className="p-3 border-t border-face-border">
+                                      <UnitCalendar
+                                        unit={unit}
+                                        month={myZimmerCalendarMonth}
+                                        onMonthChange={setMyZimmerCalendarMonth}
+                                        onUpdateStatus={(date, status) => updateUnitDateStatus(myZimmer.id, unit.id, date, status)}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Zimmer-level Calendar (when no units) */}
+                        {(!myZimmer.units || myZimmer.units.length === 0) && (
+                          <div className="bg-white rounded-lg border border-face-border p-4">
+                            <h3 className="font-bold text-face-text flex items-center gap-2 mb-4">
+                              <CalendarIcon size={18} />
+                              לוח תפוסה
+                            </h3>
+                            <ZimmerAvailabilityCalendar
+                              zimmer={myZimmer}
+                              month={myZimmerCalendarMonth}
+                              onMonthChange={setMyZimmerCalendarMonth}
+                              onUpdateStatus={async (date, status) => {
+                                const newStatuses = { ...(myZimmer.dateStatuses || {}), [date]: status };
+                                if (status === 'available') delete newStatuses[date];
+                                await updateZimmer(myZimmer.id, { dateStatuses: newStatuses });
+                              }}
+                            />
+                          </div>
+                        )}
+
+                        {/* Matching Requests Section */}
+                        <div className="bg-white rounded-lg border border-face-border p-4">
+                          <h3 className="font-bold text-face-text flex items-center gap-2 mb-4">
+                            <Heart size={18} className="text-pink-500" />
+                            ביקושים מתאימים
+                          </h3>
+                          {myMatches.length === 0 ? (
+                            <div className="text-center py-6 text-face-muted">
+                              <Heart className="mx-auto mb-2 opacity-30" size={40} />
+                              <p className="text-sm">אין כרגע ביקושים שמתאימים לצימר שלך</p>
+                              <p className="text-xs mt-1">ביקושים חדשים יופיעו כאן כשיתאימו למיקום ולפרטים שלך</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-3">
+                              <div className="text-xs text-face-muted mb-2">
+                                נמצאו {myMatches.length} ביקושים מתאימים
+                              </div>
+                              {myMatches.map(({ request, score, matchDetails }) => (
+                                <div key={request.id} className="p-3 rounded-lg border border-pink-200 bg-pink-50/50">
+                                  <div className="flex items-start justify-between">
+                                    <div className="flex-1">
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <span className="font-bold text-face-text">{request.customerName}</span>
+                                        <span className="px-2 py-0.5 bg-pink-100 text-pink-700 rounded-full text-xs font-bold">
+                                          {score}% התאמה
+                                        </span>
+                                      </div>
+                                      <div className="flex flex-wrap gap-3 text-sm text-face-muted">
+                                        <span className="flex items-center gap-1">
+                                          <CalendarIcon size={14} />
+                                          {request.dates}
+                                        </span>
+                                        {request.locationPref && (
+                                          <span className="flex items-center gap-1">
+                                            <MapPin size={14} />
+                                            {request.locationPref}
+                                          </span>
+                                        )}
+                                        <span className="flex items-center gap-1">
+                                          <DoorOpen size={14} />
+                                          {request.roomsNeeded} חדרים
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                          <Bed size={14} />
+                                          {request.bedsNeeded} מיטות
+                                        </span>
+                                      </div>
+                                      {request.contactInfo && (
+                                        <div className="mt-2">
+                                          <a
+                                            href={`https://wa.me/972${request.contactInfo.replace(/^0/, '').replace(/[-\s]/g, '')}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-1 px-3 py-1 bg-whatsapp-primary text-white text-xs rounded-lg font-bold hover:bg-whatsapp-dark transition-all"
+                                          >
+                                            <MessageCircle size={14} />
+                                            WhatsApp
+                                          </a>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </motion.div>
               )}
               {activeTab === 'stats' && (
@@ -2956,6 +3138,600 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+// Unit Form Component
+interface UnitFormProps {
+  initialData?: Partial<ZimmerUnit>;
+  onSubmit: (data: Omit<ZimmerUnit, 'id'>) => void;
+  onCancel: () => void;
+}
+
+function UnitForm({ initialData, onSubmit, onCancel }: UnitFormProps) {
+  const [name, setName] = useState(initialData?.name || '');
+  const [rooms, setRooms] = useState(initialData?.rooms || 1);
+  const [beds, setBeds] = useState(initialData?.beds || 2);
+  const [price, setPrice] = useState(initialData?.price || '');
+  const [notes, setNotes] = useState(initialData?.notes || '');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      alert('יש להזין שם ליחידה');
+      return;
+    }
+    onSubmit({ name, rooms, beds, price: price || undefined, notes: notes || undefined });
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      <div>
+        <label className="text-xs font-bold text-face-muted block mb-1">שם היחידה *</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="לדוגמה: סוויטה רומנטית"
+          className="w-full px-3 py-2 border border-face-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-whatsapp-primary"
+          maxLength={50}
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-bold text-face-muted block mb-1">חדרים</label>
+          <input
+            type="number"
+            value={rooms}
+            onChange={(e) => setRooms(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+            min={1}
+            max={20}
+            className="w-full px-3 py-2 border border-face-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-whatsapp-primary"
+          />
+        </div>
+        <div>
+          <label className="text-xs font-bold text-face-muted block mb-1">מיטות</label>
+          <input
+            type="number"
+            value={beds}
+            onChange={(e) => setBeds(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+            min={1}
+            max={50}
+            className="w-full px-3 py-2 border border-face-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-whatsapp-primary"
+          />
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-bold text-face-muted block mb-1">מחיר (אופציונלי)</label>
+        <input
+          type="text"
+          value={price}
+          onChange={(e) => setPrice(e.target.value)}
+          placeholder="לדוגמה: 800 ללילה"
+          className="w-full px-3 py-2 border border-face-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-whatsapp-primary"
+          maxLength={50}
+        />
+      </div>
+      <div>
+        <label className="text-xs font-bold text-face-muted block mb-1">הערות (אופציונלי)</label>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="פרטים נוספים על היחידה..."
+          className="w-full px-3 py-2 border border-face-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-whatsapp-primary resize-none"
+          rows={2}
+          maxLength={500}
+        />
+        <div className="text-xs text-face-muted text-left mt-1">{notes.length}/500</div>
+      </div>
+      <div className="flex gap-2 justify-end">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="px-4 py-2 bg-neutral-100 text-face-text rounded-lg text-sm font-bold hover:bg-neutral-200 transition-all"
+        >
+          ביטול
+        </button>
+        <button
+          type="submit"
+          className="px-4 py-2 bg-whatsapp-primary text-white rounded-lg text-sm font-bold hover:bg-whatsapp-dark transition-all"
+        >
+          {initialData ? 'עדכן' : 'הוסף'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// Unit Calendar Component (for editing unit availability)
+interface UnitCalendarProps {
+  unit: ZimmerUnit;
+  month: Date;
+  onMonthChange: (date: Date) => void;
+  onUpdateStatus: (date: string, status: DateStatus) => void;
+}
+
+function UnitCalendar({ unit, month, onMonthChange, onUpdateStatus }: UnitCalendarProps) {
+  const monthStart = startOfMonth(month);
+  const monthEnd = endOfMonth(month);
+  const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
+  const firstDayOfWeek = monthStart.getDay();
+  const hebrewDays = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
+
+  const statusColors: Record<DateStatus, string> = {
+    available: 'bg-green-100 text-green-700 border-green-300',
+    maybe: 'bg-amber-100 text-amber-700 border-amber-300',
+    occupied: 'bg-red-100 text-red-700 border-red-300'
+  };
+
+  const getStatus = (dateKey: string): DateStatus => {
+    if (unit.dateStatuses && unit.dateStatuses[dateKey]) {
+      return unit.dateStatuses[dateKey];
+    }
+    return 'available';
+  };
+
+  const cycleStatus = (current: DateStatus): DateStatus => {
+    if (current === 'available') return 'occupied';
+    if (current === 'occupied') return 'maybe';
+    return 'available';
+  };
+
+  return (
+    <div className="space-y-2">
+      {/* Status Legend */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3 text-xs">
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-green-100 border border-green-300" />
+            <span>פנוי</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-amber-100 border border-amber-300" />
+            <span>אולי</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-red-100 border border-red-300" />
+            <span>תפוס</span>
+          </div>
+        </div>
+        <div className="text-xs text-face-muted">לחץ על תאריך לשנות סטטוס</div>
+      </div>
+
+      {/* Month Navigation */}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => onMonthChange(addDays(monthStart, -15))}
+          className="p-1 hover:bg-neutral-100 rounded transition-all"
+        >
+          <ChevronUp size={16} className="rotate-90" />
+        </button>
+        <span className="text-sm font-bold">{format(month, 'MMMM yyyy', { locale: he })}</span>
+        <button
+          onClick={() => onMonthChange(addDays(monthEnd, 15))}
+          className="p-1 hover:bg-neutral-100 rounded transition-all"
+        >
+          <ChevronDown size={16} className="rotate-90" />
+        </button>
+      </div>
+
+      {/* Calendar Grid */}
+      <div className="grid grid-cols-7 gap-1">
+        {hebrewDays.map((day, i) => (
+          <div key={day} className={`text-center text-xs font-bold py-1 ${i === 6 ? 'text-blue-600' : 'text-face-muted'}`}>
+            {day}
+          </div>
+        ))}
+        {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+          <div key={`empty-${i}`} />
+        ))}
+        {days.map(day => {
+          const dateKey = format(day, 'yyyy-MM-dd');
+          const isToday = isSameDay(day, new Date());
+          const isPast = day < new Date(new Date().setHours(0, 0, 0, 0));
+          const status = getStatus(dateKey);
+
+          return (
+            <button
+              key={dateKey}
+              disabled={isPast}
+              onClick={() => onUpdateStatus(dateKey, cycleStatus(status))}
+              className={`p-2 text-xs rounded border transition-all ${
+                isPast ? 'opacity-40 cursor-not-allowed bg-neutral-50' : statusColors[status] + ' hover:opacity-80 cursor-pointer'
+              } ${isToday ? 'ring-2 ring-amber-400' : ''}`}
+            >
+              {format(day, 'd')}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Zimmer Availability Calendar Component (for zimmers without units)
+interface ZimmerAvailabilityCalendarProps {
+  zimmer: ZimmerAvailability;
+  month: Date;
+  onMonthChange: (date: Date) => void;
+  onUpdateStatus: (date: string, status: DateStatus) => void;
+}
+
+function ZimmerAvailabilityCalendar({ zimmer, month, onMonthChange, onUpdateStatus }: ZimmerAvailabilityCalendarProps) {
+  const monthStart = startOfMonth(month);
+  const monthEnd = endOfMonth(month);
+  const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
+  const firstDayOfWeek = monthStart.getDay();
+  const hebrewDays = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
+
+  const statusColors: Record<DateStatus, string> = {
+    available: 'bg-green-100 text-green-700 border-green-300',
+    maybe: 'bg-amber-100 text-amber-700 border-amber-300',
+    occupied: 'bg-red-100 text-red-700 border-red-300'
+  };
+
+  const getStatus = (dateKey: string): DateStatus => {
+    if (zimmer.dateStatuses && zimmer.dateStatuses[dateKey]) {
+      return zimmer.dateStatuses[dateKey];
+    }
+    if (zimmer.disabledDates?.includes(dateKey)) {
+      return 'occupied';
+    }
+    return 'available';
+  };
+
+  const cycleStatus = (current: DateStatus): DateStatus => {
+    if (current === 'available') return 'occupied';
+    if (current === 'occupied') return 'maybe';
+    return 'available';
+  };
+
+  return (
+    <div className="space-y-2">
+      {/* Status Legend */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3 text-xs">
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-green-100 border border-green-300" />
+            <span>פנוי</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-amber-100 border border-amber-300" />
+            <span>אולי</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <div className="w-3 h-3 rounded bg-red-100 border border-red-300" />
+            <span>תפוס</span>
+          </div>
+        </div>
+        <div className="text-xs text-face-muted">לחץ על תאריך לשנות סטטוס</div>
+      </div>
+
+      {/* Month Navigation */}
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => onMonthChange(addDays(monthStart, -15))}
+          className="p-1 hover:bg-neutral-100 rounded transition-all"
+        >
+          <ChevronUp size={16} className="rotate-90" />
+        </button>
+        <span className="text-sm font-bold">{format(month, 'MMMM yyyy', { locale: he })}</span>
+        <button
+          onClick={() => onMonthChange(addDays(monthEnd, 15))}
+          className="p-1 hover:bg-neutral-100 rounded transition-all"
+        >
+          <ChevronDown size={16} className="rotate-90" />
+        </button>
+      </div>
+
+      {/* Calendar Grid */}
+      <div className="grid grid-cols-7 gap-1">
+        {hebrewDays.map((day, i) => (
+          <div key={day} className={`text-center text-xs font-bold py-1 ${i === 6 ? 'text-blue-600' : 'text-face-muted'}`}>
+            {day}
+          </div>
+        ))}
+        {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+          <div key={`empty-${i}`} />
+        ))}
+        {days.map(day => {
+          const dateKey = format(day, 'yyyy-MM-dd');
+          const isToday = isSameDay(day, new Date());
+          const isPast = day < new Date(new Date().setHours(0, 0, 0, 0));
+          const status = getStatus(dateKey);
+
+          return (
+            <button
+              key={dateKey}
+              disabled={isPast}
+              onClick={() => onUpdateStatus(dateKey, cycleStatus(status))}
+              className={`p-2 text-xs rounded border transition-all ${
+                isPast ? 'opacity-40 cursor-not-allowed bg-neutral-50' : statusColors[status] + ' hover:opacity-80 cursor-pointer'
+              } ${isToday ? 'ring-2 ring-amber-400' : ''}`}
+            >
+              {format(day, 'd')}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Main Calendar Component for browsing available zimmers
+interface MainCalendarProps {
+  zimmers: ZimmerAvailability[];
+  month: Date;
+  onMonthChange: (date: Date) => void;
+  selectedDate: string | null;
+  onSelectDate: (date: string | null) => void;
+  getZimmerStatusForDate: (zimmer: ZimmerAvailability, dateKey: string) => DateStatus;
+  getAvailableUnitsForDate: (zimmer: ZimmerAvailability, dateKey: string) => { unit: ZimmerUnit; status: DateStatus }[];
+}
+
+function MainCalendar({
+  zimmers,
+  month,
+  onMonthChange,
+  selectedDate,
+  onSelectDate,
+  getZimmerStatusForDate,
+  getAvailableUnitsForDate
+}: MainCalendarProps) {
+  const monthStart = startOfMonth(month);
+  const monthEnd = endOfMonth(month);
+  const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
+  const firstDayOfWeek = monthStart.getDay();
+  const hebrewDays = ['א׳', 'ב׳', 'ג׳', 'ד׳', 'ה׳', 'ו׳', 'ש׳'];
+
+  // Get Hebrew date for display
+  const getHebrewDate = (date: Date): string => {
+    try {
+      const hd = new HDate(date);
+      return hd.renderGematriya();
+    } catch {
+      return '';
+    }
+  };
+
+  // Get available zimmers for selected date
+  const availableZimmersForDate = useMemo(() => {
+    if (!selectedDate) return [];
+    return zimmers
+      .map(zimmer => {
+        const status = getZimmerStatusForDate(zimmer, selectedDate);
+        const availableUnits = getAvailableUnitsForDate(zimmer, selectedDate);
+        return { zimmer, status, availableUnits };
+      })
+      .filter(({ status }) => status !== 'occupied');
+  }, [zimmers, selectedDate, getZimmerStatusForDate, getAvailableUnitsForDate]);
+
+  return (
+    <div className="space-y-4">
+      {/* Calendar */}
+      <div className="bg-white rounded-lg border border-face-border overflow-hidden">
+        {/* Month Navigation */}
+        <div className="flex items-center justify-between p-3 border-b border-face-border bg-gradient-to-l from-whatsapp-primary/10 to-white">
+          <button
+            onClick={() => onMonthChange(addDays(monthStart, -15))}
+            className="p-2 hover:bg-neutral-100 rounded-lg transition-all"
+          >
+            <ChevronUp size={20} className="rotate-90" />
+          </button>
+          <div className="text-center">
+            <h2 className="text-lg font-bold text-face-text">
+              {format(month, 'MMMM yyyy', { locale: he })}
+            </h2>
+            <p className="text-xs text-face-muted">לחץ על תאריך לראות צימרים פנויים</p>
+          </div>
+          <button
+            onClick={() => onMonthChange(addDays(monthEnd, 15))}
+            className="p-2 hover:bg-neutral-100 rounded-lg transition-all"
+          >
+            <ChevronDown size={20} className="rotate-90" />
+          </button>
+        </div>
+
+        {/* Day Headers */}
+        <div className="grid grid-cols-7 border-b border-face-border">
+          {hebrewDays.map((day, i) => (
+            <div key={day} className={`p-2 text-center text-xs font-bold bg-neutral-50 ${i === 6 ? 'text-blue-600' : 'text-face-muted'}`}>
+              {day}
+            </div>
+          ))}
+        </div>
+
+        {/* Calendar Grid */}
+        <div className="grid grid-cols-7">
+          {/* Empty cells */}
+          {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+            <div key={`empty-${i}`} className="min-h-[60px] p-1 bg-neutral-50/50 border-b border-l border-face-border" />
+          ))}
+
+          {/* Days */}
+          {days.map(day => {
+            const dateKey = format(day, 'yyyy-MM-dd');
+            const isToday = isSameDay(day, new Date());
+            const isShabbat = day.getDay() === 6;
+            const hebrewDate = getHebrewDate(day);
+            const isSelected = selectedDate === dateKey;
+            const isPast = day < new Date(new Date().setHours(0, 0, 0, 0));
+
+            // Count available zimmers for this day
+            const availableCount = zimmers.filter(z => getZimmerStatusForDate(z, dateKey) !== 'occupied').length;
+
+            return (
+              <div
+                key={dateKey}
+                onClick={() => !isPast && onSelectDate(isSelected ? null : dateKey)}
+                className={`min-h-[60px] p-1 border-b border-l border-face-border transition-all ${
+                  isPast ? 'bg-neutral-100 opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-whatsapp-primary/5'
+                } ${isToday ? 'bg-amber-50' : isShabbat ? 'bg-blue-50/30' : ''
+                } ${isSelected ? 'ring-2 ring-whatsapp-primary ring-inset bg-whatsapp-primary/10' : ''}`}
+              >
+                {/* Date Header */}
+                <div className="flex justify-between items-start mb-1">
+                  <span className={`text-sm font-bold ${isToday ? 'text-amber-600' : isShabbat ? 'text-blue-600' : 'text-face-text'}`}>
+                    {format(day, 'd')}
+                  </span>
+                  <span className="text-[9px] text-face-muted">{hebrewDate}</span>
+                </div>
+
+                {/* Available Count */}
+                {!isPast && availableCount > 0 && (
+                  <div className="text-center mt-1">
+                    <span className="text-[10px] text-whatsapp-primary font-bold">
+                      {availableCount} פנויים
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Available Zimmers List */}
+      {selectedDate && (
+        <div className="bg-white rounded-lg border border-face-border p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-face-text flex items-center gap-2">
+              <CalendarIcon size={20} className="text-whatsapp-primary" />
+              צימרים פנויים ב-{format(parseISO(selectedDate), 'd בMMMM yyyy', { locale: he })}
+            </h3>
+            <button
+              onClick={() => onSelectDate(null)}
+              className="p-2 text-face-muted hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+              title="סגור"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          {/* Status Legend */}
+          <div className="flex items-center gap-4 text-xs text-face-muted mb-4 pb-3 border-b border-face-border">
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <span>פנוי</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-amber-500" />
+              <span>אולי פנוי</span>
+            </div>
+          </div>
+
+          {availableZimmersForDate.length === 0 ? (
+            <div className="text-center py-8 text-face-muted">
+              <div className="text-4xl mb-2">😔</div>
+              <p>אין צימרים פנויים בתאריך זה</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {availableZimmersForDate.map(({ zimmer, status, availableUnits }) => (
+                <div
+                  key={zimmer.id}
+                  className={`p-4 rounded-lg border ${
+                    status === 'available' ? 'border-green-200 bg-green-50/50' : 'border-amber-200 bg-amber-50/50'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    {/* Logo */}
+                    {zimmer.logo && (
+                      <img
+                        src={zimmer.logo}
+                        alt={zimmer.name}
+                        className="w-12 h-12 rounded-full object-cover flex-shrink-0"
+                      />
+                    )}
+
+                    <div className="flex-1 min-w-0">
+                      {/* Zimmer Name & Status */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <h4 className="font-bold text-face-text">{zimmer.name}</h4>
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                          status === 'available'
+                            ? 'bg-green-100 text-green-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {status === 'available' ? 'פנוי' : 'אולי פנוי'}
+                        </span>
+                      </div>
+
+                      {/* Location & Details */}
+                      <div className="flex flex-wrap items-center gap-3 text-sm text-face-muted mb-2">
+                        <span className="flex items-center gap-1">
+                          <MapPin size={14} />
+                          {zimmer.location}
+                        </span>
+                        {!zimmer.units?.length && (
+                          <>
+                            <span className="flex items-center gap-1">
+                              <DoorOpen size={14} />
+                              {zimmer.rooms} חדרים
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <Bed size={14} />
+                              {zimmer.beds} מיטות
+                            </span>
+                          </>
+                        )}
+                        {zimmer.price && (
+                          <span className="flex items-center gap-1">
+                            <DollarSign size={14} />
+                            {zimmer.price}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Units List */}
+                      {availableUnits.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                          <p className="text-xs font-bold text-face-muted">יחידות נופש פנויות:</p>
+                          {availableUnits.map(({ unit, status: unitStatus }) => (
+                            <div
+                              key={unit.id}
+                              className={`flex items-center gap-2 p-2 rounded ${
+                                unitStatus === 'available' ? 'bg-green-100/50' : 'bg-amber-100/50'
+                              }`}
+                            >
+                              <div className={`w-2 h-2 rounded-full ${
+                                unitStatus === 'available' ? 'bg-green-500' : 'bg-amber-500'
+                              }`} />
+                              <span className="font-medium text-sm">{unit.name}</span>
+                              <span className="text-xs text-face-muted">
+                                {unit.rooms} חדרים | {unit.beds} מיטות
+                              </span>
+                              {unit.price && (
+                                <span className="text-xs text-face-muted">| {unit.price}</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Contact */}
+                      {zimmer.contactInfo && (
+                        <div className="mt-3 pt-2 border-t border-face-border/50">
+                          <a
+                            href={`https://wa.me/972${zimmer.contactInfo.replace(/^0/, '').replace(/[-\s]/g, '')}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-2 px-3 py-1.5 bg-whatsapp-primary text-white text-sm font-bold rounded-lg hover:bg-whatsapp-dark transition-all"
+                          >
+                            <MessageCircle size={14} />
+                            WhatsApp
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -44,6 +44,24 @@ service cloud.firestore {
               val.contactInfo.matches('^[0-9\\-\\+\\s\\(\\)]*$'));
     }
 
+    // Validate Zimmer Unit Data
+    function isValidUnit(unit) {
+      return unit.keys().hasAll(['id', 'name', 'beds', 'rooms']) &&
+             unit.id is string && unit.id.size() <= 50 &&
+             isValidString(unit.name, 100) &&
+             unit.beds is number && unit.beds >= 1 && unit.beds <= 50 &&
+             unit.rooms is number && unit.rooms >= 1 && unit.rooms <= 20 &&
+             (!('price' in unit) || isValidString(unit.price, 50)) &&
+             (!('notes' in unit) || isValidString(unit.notes, 500));
+    }
+
+    // Validate units array (max 5 units)
+    function isValidUnits(data) {
+      return !('units' in data) ||
+             (data.units is list &&
+              data.units.size() <= 5);
+    }
+
     // Validate Zimmer Data
     function isValidZimmer(data) {
       return data.keys().hasAll(['name', 'location']) &&
@@ -51,7 +69,8 @@ service cloud.firestore {
              isValidString(data.location, 100) &&
              isValidPhone(data) &&
              (!('notes' in data) || isValidString(data.notes, 1000)) &&
-             (!('price' in data) || isValidString(data.price, 50));
+             (!('price' in data) || isValidString(data.price, 50)) &&
+             isValidUnits(data);
     }
 
     // Validate Request Data

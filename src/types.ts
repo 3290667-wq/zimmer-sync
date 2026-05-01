@@ -1,5 +1,16 @@
 export type DateStatus = 'available' | 'occupied' | 'maybe';
 
+// יחידת נופש - תת-צימר עם לוח תפוסה נפרד
+export interface ZimmerUnit {
+  id: string;
+  name: string;                                    // "סוויטה רומנטית"
+  beds: number;
+  rooms: number;
+  price?: string;
+  notes?: string;
+  dateStatuses?: { [date: string]: DateStatus };   // לוח תפוסה נפרד ליחידה
+}
+
 export interface ZimmerAvailability {
   id: string;
   ownerUid?: string;
@@ -14,7 +25,8 @@ export interface ZimmerAvailability {
   logo?: string;
   images?: string[]; // Array of image URLs (up to 3)
   disabledDates?: string[]; // Array of ISO date strings (legacy)
-  dateStatuses?: { [date: string]: DateStatus }; // New: status per date
+  dateStatuses?: { [date: string]: DateStatus }; // Default status (for zimmers without units)
+  units?: ZimmerUnit[]; // יחידות נופש (עד 5)
   updatedAt?: string;
 }
 
