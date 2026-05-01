@@ -1,0 +1,33 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /logos/{fileName} {
+      // Anyone can read logos (public)
+      allow read: if true;
+
+      // Users can only upload to paths starting with their own UID
+      allow write: if request.auth != null
+                   && fileName.matches(request.auth.uid + '_.*')
+                   && request.resource.size < 2 * 1024 * 1024
+                   && request.resource.contentType.matches('image/(png|jpeg|jpg|gif|webp)')
+                   && !fileName.matches('.*\\.\\./.*');
+    }
+
+    match /zimmer-images/{fileName} {
+      // Anyone can read zimmer images (public)
+      allow read: if true;
+
+      // Users can only upload to paths starting with their own UID
+      allow write: if request.auth != null
+                   && fileName.matches(request.auth.uid + '_.*')
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/(png|jpeg|jpg|gif|webp)')
+                   && !fileName.matches('.*\\.\\./.*');
+    }
+
+    // Block all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

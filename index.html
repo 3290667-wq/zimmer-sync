@@ -1,13 +1,64 @@
 <!doctype html>
-<html lang="en">
+<html lang="he" dir="rtl">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <!-- Security Headers -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta http-equiv="X-Frame-Options" content="DENY" />
+    <meta http-equiv="X-XSS-Protection" content="1; mode=block" />
+    <meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin" />
+    <meta http-equiv="Permissions-Policy" content="geolocation=(), microphone=(), camera=()" />
+    <title>ZimmerSync - ניהול מאגר צימרים וביקושים</title>
+    <meta name="description" content="מערכת לניהול מאגר צימרים פנויים וביקושי לקוחות. צפייה בזמינות, עדכון יומן ושיתוף פעולה בין בעלי צימרים." />
+    <meta name="theme-color" content="#25D366" />
+    <meta name="author" content="ZimmerSync" />
+    <meta name="google-site-verification" content="Jp9LYjTp_4kiYZ7d2n-Nj331ZIJ4LykBIvXws1uv8o4" />
+
+    <!-- Legal pages for Google OAuth verification -->
+    <link rel="privacy-policy" href="/privacy.html" />
+    <link rel="terms-of-service" href="/terms.html" />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="shortcut icon" type="image/png" href="/logo.png" />
+
+    <!-- Apple Touch Icon -->
+    <link rel="apple-touch-icon" href="/logo.png" />
+
+    <!-- Open Graph / Facebook / WhatsApp -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://gen-lang-client-0210793125.web.app/" />
+    <meta property="og:title" content="ZimmerSync - ניהול מאגר צימרים" />
+    <meta property="og:description" content="מערכת לניהול מאגר צימרים פנויים וביקושי לקוחות. צפייה בזמינות, עדכון יומן ושיתוף פעולה." />
+    <meta property="og:image" content="https://gen-lang-client-0210793125.web.app/logo.png" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta property="og:locale" content="he_IL" />
+    <meta property="og:site_name" content="ZimmerSync" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="ZimmerSync - ניהול מאגר צימרים" />
+    <meta name="twitter:description" content="מערכת לניהול מאגר צימרים פנויים וביקושי לקוחות." />
+    <meta name="twitter:image" content="https://gen-lang-client-0210793125.web.app/logo.png" />
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- iOS PWA settings -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ZimmerSync" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <noscript>
+      <p style="text-align:center;padding:20px;">
+        <a href="/privacy.html">Privacy Policy</a> | <a href="/terms.html">Terms of Service</a>
+      </p>
+    </noscript>
   </body>
 </html>
 

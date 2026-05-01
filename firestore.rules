@@ -3,24 +3,9 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Fields: userId, email, displayName, photoURL, role
-    //
-    // Collection: zimmers
-    // Fields: ownerUid, name, location, rooms, beds, price, contactInfo, notes, dates, disabledDates, updatedAt
-    //
-    // Collection: requests
-    // Fields: customerName, locationPref, dates, roomsNeeded, bedsNeeded, budget, contactInfo, notes, createdBy, updatedAt
-    //
-    // ===============================================================
-
-    // ===============================================================
     // Helper Functions
     // ===============================================================
-    
+
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -29,15 +14,34 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // Admin check - uses role from users collection OR verified admin emails
     function isAdmin() {
       return isAuthenticated() &&
         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-          (request.auth.token.email == "3290667@gmail.com" && request.auth.token.email_verified == true));
+          isAdminEmail());
     }
 
-    // Validate string size
+    // Check if email is in admin list (stored in config collection)
+    function isAdminEmail() {
+      return request.auth.token.email_verified == true &&
+        exists(/databases/$(database)/documents/config/admins) &&
+        request.auth.token.email in get(/databases/$(database)/documents/config/admins).data.emails;
+    }
+
+    // Validate string size and content (basic XSS prevention)
     function isValidString(val, max) {
-      return val is string && val.size() <= max;
+      return val is string &&
+             val.size() <= max &&
+             !val.matches('.*<script.*') &&
+             !val.matches('.*javascript:.*');
+    }
+
+    // Validate phone number format (Israeli format)
+    function isValidPhone(val) {
+      return !('contactInfo' in val) ||
+             (val.contactInfo is string &&
+              val.contactInfo.size() <= 20 &&
+              val.contactInfo.matches('^[0-9\\-\\+\\s\\(\\)]*$'));
     }
 
     // Validate Zimmer Data
@@ -45,8 +49,9 @@ service cloud.firestore {
       return data.keys().hasAll(['name', 'location']) &&
              isValidString(data.name, 100) &&
              isValidString(data.location, 100) &&
-             (!('contactInfo' in data) || isValidString(data.contactInfo, 100)) &&
-             (!('notes' in data) || isValidString(data.notes, 1000));
+             isValidPhone(data) &&
+             (!('notes' in data) || isValidString(data.notes, 1000)) &&
+             (!('price' in data) || isValidString(data.price, 50));
     }
 
     // Validate Request Data
@@ -54,29 +59,68 @@ service cloud.firestore {
       return data.keys().hasAll(['customerName', 'dates']) &&
              isValidString(data.customerName, 100) &&
              isValidString(data.dates, 100) &&
-             (!('locationPref' in data) || isValidString(data.locationPref, 100));
+             isValidPhone(data) &&
+             (!('locationPref' in data) || isValidString(data.locationPref, 100)) &&
+             (!('budget' in data) || isValidString(data.budget, 50)) &&
+             (!('notes' in data) || isValidString(data.notes, 500));
+    }
+
+    // Check if only claim-related fields are being modified
+    function isOnlyClaimUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedBy', 'updatedAt']);
     }
 
     // ===============================================================
-    // Rules
+    // Config Collection (Admin only)
+    // ===============================================================
+
+    match /config/{configId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ===============================================================
+    // Users Collection
     // ===============================================================
 
     match /users/{userId} {
-      allow read: if isAuthenticated();
+      // Users can only read their own profile, admins can read all
+      allow read: if isOwner(userId) || isAdmin();
+      // Users can only write their own profile
       allow write: if isOwner(userId);
     }
 
+    // ===============================================================
+    // Zimmers Collection
+    // ===============================================================
+
     match /zimmers/{zimmerId} {
-      allow read: if isAuthenticated();
+      // Allow public read access for zimmers (guests can view)
+      allow read: if true;
       allow create: if isAuthenticated() && isValidZimmer(request.resource.data);
-      allow update: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.ownerUid) && isValidZimmer(request.resource.data);
+      allow update: if isAuthenticated() &&
+                       (isAdmin() || request.auth.uid == resource.data.ownerUid) &&
+                       isValidZimmer(request.resource.data);
       allow delete: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.ownerUid);
     }
 
+    // ===============================================================
+    // Requests Collection
+    // ===============================================================
+
     match /requests/{requestId} {
+      // Only authenticated users can read requests (removed public access)
       allow read: if isAuthenticated();
       allow create: if isAuthenticated() && isValidRequest(request.resource.data);
-      allow update: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.createdBy) && isValidRequest(request.resource.data);
+      // Allow update by: admin, creator (with validation), or any authenticated user for claim/unclaim only
+      allow update: if isAuthenticated() && (
+        // Admin can update anything
+        isAdmin() ||
+        // Creator can update with validation
+        (request.auth.uid == resource.data.createdBy && isValidRequest(request.resource.data)) ||
+        // Any authenticated user can claim/unclaim (only claimedBy and updatedAt fields)
+        isOnlyClaimUpdate()
+      );
       allow delete: if isAuthenticated() && (isAdmin() || request.auth.uid == resource.data.createdBy);
     }
   }
